@@ -36,6 +36,9 @@ type BMC struct {
 	BootMode metal3api.BootMode `yaml:"bootMode,omitempty"`
 	// Name of the machine associated with this BMC.
 	Name string `yaml:"name,omitempty"`
+	// Namespace is the Kubernetes namespace for the BareMetalHost.
+	// If empty, the test spec name is used.
+	Namespace string `yaml:"namespace,omitempty"`
 	// IPAddress is a reserved IP address for the BMH managed through this BMC.
 	// This is used in tests that make ssh connections to the BMH.
 	// Example: 192.168.222.122
