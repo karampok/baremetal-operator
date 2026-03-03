@@ -4,12 +4,14 @@ package e2e
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
-	"os"
+	"io"
+	"net/http"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"syscall"
+	"time"
 
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
@@ -27,11 +29,10 @@ const biosSettingName = "ProcTurboMode"
 
 var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	var (
-		bmh      metal3api.BareMetalHost
-		hfs      *metal3api.HostFirmwareSettings
-		newValue string
-		pingCmd  *exec.Cmd
-		pingFile *os.File
+		bmh           metal3api.BareMetalHost
+		hfs           *metal3api.HostFirmwareSettings
+		newValue      string
+		cancelMonitor context.CancelFunc
 	)
 
 	BeforeEach(func() {
@@ -43,16 +44,21 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			By(fmt.Sprintf("Creating BMH %s", bmhKey))
 			bmh, err = createBMH(ctx, bmhKey, clusterProxy)
 			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for BMH to become available")
+			WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
+				Client: clusterProxy.GetClient(),
+				Bmh:    bmh,
+				State:  metal3api.StateAvailable,
+			}, e2eConfig.GetIntervals("default", "wait-available")...)
 		case err != nil:
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		By(fmt.Sprintf("Waiting for BMH %s/%s to become available", bmh.Namespace, bmh.Name))
-		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
-			Client: clusterProxy.GetClient(),
-			Bmh:    bmh,
-			State:  metal3api.StateAvailable,
-		}, e2eConfig.GetIntervals("default", "wait-available")...)
+		state := bmh.Status.Provisioning.State
+		Logf("BMH %s/%s is in state %s", bmh.Namespace, bmh.Name, state)
+		Expect(state).To(BeElementOf(metal3api.StateAvailable, metal3api.StateProvisioned),
+			fmt.Sprintf("BMH must be available or provisioned, got %s", state))
 
 		By("Reading the HostFirmwareSettings resource")
 		hfs = &metal3api.HostFirmwareSettings{}
@@ -69,45 +75,44 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	})
 
 	BeforeEach(func() {
-		By("Starting ping monitor on " + bmc.IPAddress)
-		pingLogPath := filepath.Join(artifactFolder, "ping-monitor.log")
-		var err error
-		pingFile, err = os.OpenFile(pingLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		Expect(err).NotTo(HaveOccurred())
+		By("Starting ping and redfish monitors on " + bmc.IPAddress)
+		var monCtx context.Context
+		monCtx, cancelMonitor = context.WithCancel(ctx)
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			var lastState string
+			for {
+				select {
+				case <-monCtx.Done():
+					return
+				case <-ticker.C:
+					ping := "0"
+					if err := exec.CommandContext(monCtx, "ping", "-c", "1", "-W", "2", bmc.IPAddress).Run(); err == nil {
+						ping = "1"
+					}
+					if monCtx.Err() != nil {
+						return
+					}
+					power := redfishPowerState(monCtx, bmc.Address, bmc.User, bmc.Password)
+					if power == "Unavailable" || power == "ConnError" {
+						continue
+					}
 
-		absPath, _ := filepath.Abs(pingLogPath)
-		Logf("Ping log: %s", absPath)
-
-		pingCmd = exec.Command("ping", "-D", "-O", "-i", "1", bmc.IPAddress)
-		pingCmd.Stdout = pingFile
-		pingCmd.Stderr = pingFile
-		Expect(pingCmd.Start()).To(Succeed())
+					state := power + "|" + ping
+					if state != lastState {
+						fmt.Printf("[monitor] %s | power=%s | ping=%s\n",
+							time.Now().Format("15:04:05"), power, ping)
+						lastState = state
+					}
+				}
+			}
+		}()
 	})
 
 	AfterEach(func() {
-		By("Stopping ping monitor")
-		_ = pingCmd.Process.Signal(syscall.SIGINT)
-		_ = pingCmd.Wait()
-		pingFile.Close()
-
-		By("Printing ping summary")
-		data, err := os.ReadFile(pingFile.Name())
-		Expect(err).NotTo(HaveOccurred())
-
-		var visual strings.Builder
-		for line := range strings.SplitSeq(string(data), "\n") {
-			switch {
-			case strings.Contains(line, "bytes from"):
-				visual.WriteByte('1')
-			case strings.Contains(line, "no answer"):
-				visual.WriteByte('0')
-			}
-		}
-
-		Logf("\n--- Ping Monitor (%s) ---", bmc.IPAddress)
-		Logf("  %s", visual.String())
-		Logf("  Log: %s", pingFile.Name())
-		Logf("-----------------------------------")
+		By("Stopping monitors")
+		cancelMonitor()
 	})
 
 	It("should toggle turbo BIOS setting", func() {
@@ -125,16 +130,64 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			updatedHfs := &metal3api.HostFirmwareSettings{}
 			g.Expect(clusterProxy.GetClient().Get(ctx, hfsKey, updatedHfs)).To(Succeed())
 			g.Expect(updatedHfs.Status.Settings[biosSettingName]).To(Equal(newValue))
-		}, e2eConfig.GetIntervals("default", "wait-available")...).Should(Succeed())
+		}, "25m", "5s").Should(Succeed())
 
 		By("Waiting for BMH to return to available")
 		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
 			Client: clusterProxy.GetClient(),
 			Bmh:    bmh,
 			State:  metal3api.StateAvailable,
-		}, e2eConfig.GetIntervals("default", "wait-available")...)
+		}, "25m", "5s")
 	})
 })
+
+// redfishPowerState queries the Redfish Systems endpoint and returns
+// the PowerState value (On, Off, etc.) or "Unavailable" when the BMC
+// cannot provide system data (e.g. during a reboot).
+func redfishPowerState(ctx context.Context, bmcAddress, user, password string) string {
+	idx := strings.Index(bmcAddress, "http")
+	if idx < 0 {
+		return "BadAddress"
+	}
+	redfishURL := bmcAddress[idx:]
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // #nosec G402
+			},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, redfishURL, http.NoBody)
+	if err != nil {
+		return "ReqError"
+	}
+	req.SetBasicAuth(user, password)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "ConnError"
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "ReadError"
+	}
+
+	var system struct {
+		PowerState string `json:"PowerState"`
+	}
+	if err := json.Unmarshal(body, &system); err != nil {
+		return "ParseError"
+	}
+	if system.PowerState == "" {
+		return "Unavailable"
+	}
+
+	return system.PowerState
+}
 
 func createBMH(ctx context.Context, target types.NamespacedName,
 	clusterProxy framework.ClusterProxy) (metal3api.BareMetalHost, error) {
