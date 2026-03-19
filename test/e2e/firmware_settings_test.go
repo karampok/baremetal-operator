@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -75,13 +77,23 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	})
 
 	BeforeEach(func() {
-		By("Starting ping and redfish monitors on " + bmc.IPAddress)
+		fmt.Printf("[monitor] bmc endpoint: %s\n", bmc.Address)
+		fmt.Printf("[monitor] ping target: %s\n", bmc.IPAddress)
 		var monCtx context.Context
 		monCtx, cancelMonitor = context.WithCancel(ctx)
+		bmhKey := types.NamespacedName{Namespace: bmh.Namespace, Name: bmh.Name}
+		ironicURL, ironicUser, ironicPass := ironicCredentials(ctx, clusterProxy)
+		// Use BMH provisioning ID (Ironic UUID) if available, fall back to namespace~name.
+		ironicNodeID := bmh.Namespace + "~" + bmh.Name
+		if bmh.Status.Provisioning.ID != "" {
+			ironicNodeID = bmh.Status.Provisioning.ID
+		}
+		ironicNode := ironicURL + "/v1/nodes/" + ironicNodeID
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
 			var lastState string
+			lastChange := time.Now()
 			for {
 				select {
 				case <-monCtx.Done():
@@ -94,16 +106,27 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 					if monCtx.Err() != nil {
 						return
 					}
-					power := redfishPowerState(monCtx, bmc.Address, bmc.User, bmc.Password)
-					if power == "Unavailable" || power == "ConnError" {
+					rf := redfishStatus(monCtx, bmc.Address, bmc.User, bmc.Password)
+					if !rf.Available {
 						continue
 					}
 
-					state := power + "|" + ping
+					bmhState := "?"
+					var cur metal3api.BareMetalHost
+					if err := clusterProxy.GetClient().Get(monCtx, bmhKey, &cur); err == nil {
+						bmhState = string(cur.Status.Provisioning.State)
+					}
+
+					ironicState := ironicProvisionState(monCtx, ironicNode, ironicUser, ironicPass)
+
+					state := rf.PowerState + "|" + rf.BootProgress + "|" + ping + "|" + bmhState + "|" + ironicState
 					if state != lastState {
-						fmt.Printf("[monitor] %s | power=%s | ping=%s\n",
-							time.Now().Format("15:04:05"), power, ping)
+						now := time.Now()
+						dur := now.Sub(lastChange).Truncate(time.Second)
+						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s\n",
+							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping)
 						lastState = state
+						lastChange = now
 					}
 				}
 			}
@@ -138,16 +161,33 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			Bmh:    bmh,
 			State:  metal3api.StateAvailable,
 		}, "25m", "5s")
+
+		var cur metal3api.BareMetalHost
+		Expect(clusterProxy.GetClient().Get(ctx, types.NamespacedName{Namespace: bmh.Namespace, Name: bmh.Name}, &cur)).To(Succeed())
+		rf := redfishStatus(ctx, bmc.Address, bmc.User, bmc.Password)
+		fmt.Printf("[monitor] final | power=%s, boot=%s, bmh=%s, ping=%s\n",
+			rf.PowerState, rf.BootProgress, cur.Status.Provisioning.State,
+			func() string {
+				if err := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "2", bmc.IPAddress).Run(); err == nil {
+					return "1"
+				}
+				return "0"
+			}())
 	})
 })
 
-// redfishPowerState queries the Redfish Systems endpoint and returns
-// the PowerState value (On, Off, etc.) or "Unavailable" when the BMC
-// cannot provide system data (e.g. during a reboot).
-func redfishPowerState(ctx context.Context, bmcAddress, user, password string) string {
+type redfishResult struct {
+	PowerState   string
+	BootProgress string
+	Available    bool
+}
+
+// redfishStatus queries the Redfish Systems endpoint and returns
+// power state and boot progress info.
+func redfishStatus(ctx context.Context, bmcAddress, user, password string) redfishResult {
 	idx := strings.Index(bmcAddress, "http")
 	if idx < 0 {
-		return "BadAddress"
+		return redfishResult{}
 	}
 	redfishURL := bmcAddress[idx:]
 
@@ -161,32 +201,136 @@ func redfishPowerState(ctx context.Context, bmcAddress, user, password string) s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, redfishURL, http.NoBody)
 	if err != nil {
-		return "ReqError"
+		return redfishResult{}
 	}
 	req.SetBasicAuth(user, password)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "ConnError"
+		return redfishResult{}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "ReadError"
+		return redfishResult{}
 	}
 
 	var system struct {
-		PowerState string `json:"PowerState"`
+		PowerState   string `json:"PowerState"`
+		BootProgress struct {
+			LastState string `json:"LastState"`
+		} `json:"BootProgress"`
 	}
-	if err := json.Unmarshal(body, &system); err != nil {
-		return "ParseError"
-	}
-	if system.PowerState == "" {
-		return "Unavailable"
+	if err := json.Unmarshal(body, &system); err != nil || system.PowerState == "" {
+		return redfishResult{}
 	}
 
-	return system.PowerState
+	boot := system.BootProgress.LastState
+	switch boot {
+	case "OEM", "MemoryInitializationStarted",
+		"SystemHardwareInitializationComplete",
+		"PCIResourceConfigStarted":
+		boot = "POST"
+	}
+
+	return redfishResult{
+		PowerState:   system.PowerState,
+		BootProgress: boot,
+		Available:    true,
+	}
+}
+
+// ironicCredentials reads the Ironic URL and credentials from the cluster.
+// On OCP it discovers them from the metal3-state EndpointSlice and metal3-ironic-password
+// secret in openshift-machine-api. Otherwise it falls back to e2e config variables.
+func ironicCredentials(ctx context.Context, proxy framework.ClusterProxy) (url, user, pass string) {
+	ns := "openshift-machine-api"
+
+	// Try OCP: read credentials from secret.
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{Namespace: ns, Name: "metal3-ironic-password"}
+	if err := proxy.GetClient().Get(ctx, secretKey, secret); err == nil {
+		user = string(secret.Data["username"])
+		pass = string(secret.Data["password"])
+
+		// Discover Ironic IP from metal3-state EndpointSlice via clientset.
+		slices, err := proxy.GetClientSet().DiscoveryV1().EndpointSlices(ns).List(ctx,
+			metav1.ListOptions{LabelSelector: "kubernetes.io/service-name=metal3-state"})
+		if err == nil {
+			for _, slice := range slices.Items {
+				for _, port := range slice.Ports {
+					if port.Name != nil && *port.Name == "ironic-api" && port.Port != nil {
+						for _, ep := range slice.Endpoints {
+							if len(ep.Addresses) > 0 {
+								url = fmt.Sprintf("https://%s",
+									net.JoinHostPort(ep.Addresses[0], fmt.Sprintf("%d", *port.Port)))
+								fmt.Printf("[monitor] ironic endpoint: %s\n", url)
+								return url, user, pass
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// EndpointSlice not found, build from e2eConfig.
+		ip := e2eConfig.GetVariable("IRONIC_PROVISIONING_IP")
+		port := e2eConfig.GetVariable("IRONIC_PROVISIONING_PORT")
+		url = fmt.Sprintf("https://%s", net.JoinHostPort(ip, port))
+		fmt.Printf("[monitor] ironic endpoint (e2eConfig): %s\n", url)
+		return url, user, pass
+	}
+
+	// Fall back to e2e config variables.
+	ip := e2eConfig.GetVariable("IRONIC_PROVISIONING_IP")
+	port := e2eConfig.GetVariable("IRONIC_PROVISIONING_PORT")
+	url = fmt.Sprintf("https://%s", net.JoinHostPort(ip, port))
+	user = e2eConfig.GetVariable("IRONIC_USERNAME")
+	pass = e2eConfig.GetVariable("IRONIC_PASSWORD")
+	fmt.Printf("[monitor] ironic endpoint (fallback): %s\n", url)
+	return url, user, pass
+}
+
+// ironicProvisionState queries the Ironic API for a node's provision_state.
+func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) string {
+	c := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // #nosec G402
+			},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nodeURL, http.NoBody)
+	if err != nil {
+		return "req:" + err.Error()
+	}
+	req.SetBasicAuth(user, pass)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return "conn:" + err.Error()
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("http:%d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "read:" + err.Error()
+	}
+
+	var node struct {
+		ProvisionState string `json:"provision_state"`
+	}
+	if err := json.Unmarshal(body, &node); err != nil {
+		return "json:" + err.Error()
+	}
+
+	return node.ProvisionState
 }
 
 func createBMH(ctx context.Context, target types.NamespacedName,
