@@ -31,9 +31,10 @@ const biosSettingName = "ProcTurboMode"
 
 var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	var (
-		bmh           metal3api.BareMetalHost
-		hfs           *metal3api.HostFirmwareSettings
-		newValue      string
+		bmh          metal3api.BareMetalHost
+		hfs          *metal3api.HostFirmwareSettings
+		newValue     string
+		initialState metal3api.ProvisioningState
 		cancelMonitor context.CancelFunc
 	)
 
@@ -57,10 +58,27 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		state := bmh.Status.Provisioning.State
-		Logf("BMH %s/%s is in state %s", bmh.Namespace, bmh.Name, state)
-		Expect(state).To(BeElementOf(metal3api.StateAvailable, metal3api.StateProvisioned),
-			fmt.Sprintf("BMH must be available or provisioned, got %s", state))
+		initialState = bmh.Status.Provisioning.State
+		Logf("BMH %s/%s is in state %s", bmh.Namespace, bmh.Name, initialState)
+		Expect(initialState).To(BeElementOf(metal3api.StateAvailable, metal3api.StateProvisioned),
+			fmt.Sprintf("BMH must be available or provisioned, got %s", initialState))
+
+		if initialState == metal3api.StateProvisioned {
+			By("Creating HostUpdatePolicy with firmwareSettings: onReboot")
+			hup := &metal3api.HostUpdatePolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      bmh.Name,
+					Namespace: bmh.Namespace,
+				},
+				Spec: metal3api.HostUpdatePolicySpec{
+					FirmwareSettings: metal3api.HostUpdatePolicyOnReboot,
+				},
+			}
+			err := clusterProxy.GetClient().Create(ctx, hup)
+			if !k8serrors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
 
 		By("Reading the HostFirmwareSettings resource")
 		hfs = &metal3api.HostFirmwareSettings{}
@@ -136,6 +154,14 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	AfterEach(func() {
 		By("Stopping monitors")
 		cancelMonitor()
+
+		if initialState == metal3api.StateProvisioned {
+			By("Deleting HostUpdatePolicy")
+			hup := &metal3api.HostUpdatePolicy{}
+			if err := clusterProxy.GetClient().Get(ctx, types.NamespacedName{Namespace: bmh.Namespace, Name: bmh.Name}, hup); err == nil {
+				_ = clusterProxy.GetClient().Delete(ctx, hup)
+			}
+		}
 	})
 
 	It("should toggle turbo BIOS setting", func() {
@@ -147,6 +173,11 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		}
 		Expect(helper.Patch(ctx, hfs)).To(Succeed())
 
+		if initialState == metal3api.StateProvisioned {
+			By("Annotating BMH to trigger reboot for servicing")
+			AnnotateBmh(ctx, clusterProxy.GetClient(), bmh, metal3api.RebootAnnotationPrefix, nil)
+		}
+
 		By(fmt.Sprintf("Waiting for HFS status.settings[%s] to become %q", biosSettingName, newValue))
 		hfsKey := types.NamespacedName{Namespace: bmh.Namespace, Name: bmh.Name}
 		Eventually(func(g Gomega) {
@@ -155,11 +186,11 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			g.Expect(updatedHfs.Status.Settings[biosSettingName]).To(Equal(newValue))
 		}, "25m", "5s").Should(Succeed())
 
-		By("Waiting for BMH to return to available")
+		By(fmt.Sprintf("Waiting for BMH to return to %s", initialState))
 		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
 			Client: clusterProxy.GetClient(),
 			Bmh:    bmh,
-			State:  metal3api.StateAvailable,
+			State:  initialState,
 		}, "25m", "5s")
 
 		var cur metal3api.BareMetalHost
