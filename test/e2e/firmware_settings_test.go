@@ -402,12 +402,22 @@ func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) strin
 
 	var node struct {
 		ProvisionState string `json:"provision_state"`
+		AgentURL       string `json:"agent_url"`
+		LastHeartbeat  string `json:"last_heartbeat"`
 	}
 	if err := json.Unmarshal(body, &node); err != nil {
 		return "json:" + err.Error()
 	}
 
-	return node.ProvisionState
+	state := node.ProvisionState
+	if node.AgentURL != "" {
+		age := ""
+		if t, err := time.Parse(time.RFC3339, node.LastHeartbeat); err == nil {
+			age = fmt.Sprintf("(%ds ago)", int(time.Since(t).Seconds()))
+		}
+		state += "+ipa" + age
+	}
+	return state
 }
 
 // WaitOCPReady checks once if the OCP cluster is available by reading the
