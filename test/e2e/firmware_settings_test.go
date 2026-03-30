@@ -416,12 +416,15 @@ func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) strin
 	}
 
 	state := node.ProvisionState
-	if node.AgentURL != "" {
-		age := ""
+	if node.LastHeartbeat != "" {
 		if t, err := time.Parse(time.RFC3339, node.LastHeartbeat); err == nil {
-			age = fmt.Sprintf("(%ds ago)", int(time.Since(t).Seconds()))
+			age := int(time.Since(t).Seconds())
+			if node.AgentURL != "" {
+				state += fmt.Sprintf("+ipa(%ds ago)", age)
+			} else if age < 120 {
+				state += fmt.Sprintf("+ipa!(%ds ago)", age)
+			}
 		}
-		state += "+ipa" + age
 	}
 	return state
 }
