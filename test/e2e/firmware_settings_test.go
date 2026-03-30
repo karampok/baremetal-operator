@@ -182,15 +182,17 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 						}
 					}
 
+					vmedia := redfishVirtualMedia(monCtx, bmc.Address, bmc.User, bmc.Password)
+
 					now := time.Now()
 					dest := filepath.Join(screenshotDir, fmt.Sprintf("console-%s.jpg", now.Format("20060102-150405")))
 					_ = idracConsoleScreenshot(monCtx, bmc.Address, bmc.User, bmc.Password, dest)
 
-					state := rf.PowerState + "|" + rf.BootProgress + "|" + ping + "|" + bmhState + "|" + ironicState
+					state := rf.PowerState + "|" + rf.BootProgress + "|" + ping + "|" + bmhState + "|" + ironicState + "|" + vmedia
 					if state != lastState {
 						dur := now.Sub(lastChange).Truncate(time.Second)
-						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s\n",
-							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping)
+						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s, vmedia=%s\n",
+							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping, vmedia)
 						lastState = state
 						lastChange = now
 					}
@@ -280,6 +282,47 @@ type redfishResult struct {
 	PowerState   string
 	BootProgress string
 	Available    bool
+}
+
+// redfishVirtualMedia queries the iDRAC VirtualMedia CD slot and returns the
+// filename of the currently inserted image, or "-" if nothing is mounted.
+func redfishVirtualMedia(ctx context.Context, bmcAddress, user, password string) string {
+	idx := strings.Index(bmcAddress, "https://")
+	if idx < 0 {
+		return "-"
+	}
+	host := strings.SplitN(bmcAddress[idx+len("https://"):], "/", 2)[0]
+	endpoint := "https://" + host + "/redfish/v1/Managers/iDRAC.Embedded.1/VirtualMedia/CD"
+
+	c := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+	if err != nil {
+		return "-"
+	}
+	req.SetBasicAuth(user, password)
+	resp, err := c.Do(req)
+	if err != nil {
+		return "-"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "-"
+	}
+
+	var vm struct {
+		Inserted bool   `json:"Inserted"`
+		Image    string `json:"Image"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil || !vm.Inserted || vm.Image == "" {
+		return "-"
+	}
+	// Return only the filename part of the URL to keep the monitor line short.
+	parts := strings.Split(strings.TrimRight(vm.Image, "/"), "/")
+	return parts[len(parts)-1]
 }
 
 // redfishStatus queries the Redfish Systems endpoint and returns
