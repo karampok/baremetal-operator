@@ -195,7 +195,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		fmt.Printf("[monitor] ping history: %s\n", hist)
 		fmt.Printf("[monitor] screenshots folder: %s\n", screenshotDir)
 		absScreenshotDir, _ := filepath.Abs(screenshotDir)
-		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -pattern_type glob -i '%s/console-*.jpg' out.mp4\n", absScreenshotDir)
+		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -f image2 -vcodec mjpeg -pattern_type glob -i '%s/console-*.jpg' -c:v libx264 -pix_fmt yuv420p out.mp4\n", absScreenshotDir)
 
 		if initialState == metal3api.StateProvisioned {
 			By("Deleting HostUpdatePolicy")
