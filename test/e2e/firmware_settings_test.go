@@ -5,13 +5,17 @@ package e2e
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
@@ -20,9 +24,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/cluster-api/test/framework"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/cluster-api/util/patch"
 )
 
@@ -31,11 +39,13 @@ const biosSettingName = "ProcTurboMode"
 
 var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	var (
-		bmh          metal3api.BareMetalHost
-		hfs          *metal3api.HostFirmwareSettings
-		newValue     string
-		initialState metal3api.ProvisioningState
+		bmh           metal3api.BareMetalHost
+		hfs           *metal3api.HostFirmwareSettings
+		newValue      string
+		initialState  metal3api.ProvisioningState
 		cancelMonitor context.CancelFunc
+		pingMu        sync.Mutex
+		pingHistory   []byte
 	)
 
 	BeforeEach(func() {
@@ -95,6 +105,9 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	})
 
 	BeforeEach(func() {
+		pingMu.Lock()
+		pingHistory = pingHistory[:0]
+		pingMu.Unlock()
 		fmt.Printf("[monitor] bmc endpoint: %s\n", bmc.Address)
 		fmt.Printf("[monitor] ping target: %s\n", bmc.IPAddress)
 		var monCtx context.Context
@@ -124,6 +137,9 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 					if monCtx.Err() != nil {
 						return
 					}
+					pingMu.Lock()
+					pingHistory = append(pingHistory, ping[0])
+					pingMu.Unlock()
 					rf := redfishStatus(monCtx, bmc.Address, bmc.User, bmc.Password)
 					if !rf.Available {
 						continue
@@ -141,8 +157,13 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 					if state != lastState {
 						now := time.Now()
 						dur := now.Sub(lastChange).Truncate(time.Second)
-						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s\n",
-							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping)
+						dest := filepath.Join(artifactFolder, fmt.Sprintf("console-%s.png", now.Format("15-04-05")))
+						screenshotNote := fmt.Sprintf("(screenshot at %s)", dest)
+						if err := idracConsoleScreenshot(monCtx, bmc.Address, bmc.User, bmc.Password, dest); err != nil {
+							screenshotNote = fmt.Sprintf("(screenshot error: %v)", err)
+						}
+						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s %s\n",
+							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping, screenshotNote)
 						lastState = state
 						lastChange = now
 					}
@@ -154,6 +175,20 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	AfterEach(func() {
 		By("Stopping monitors")
 		cancelMonitor()
+
+		rf := redfishStatus(ctx, bmc.Address, bmc.User, bmc.Password)
+		pingMu.Lock()
+		hist := string(pingHistory)
+		pingMu.Unlock()
+		fmt.Printf("[monitor] final | power=%s, boot=%s, ping=%s\n",
+			rf.PowerState, rf.BootProgress,
+			func() string {
+				if err := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "2", bmc.IPAddress).Run(); err == nil {
+					return "1"
+				}
+				return "0"
+			}())
+		fmt.Printf("[monitor] ping history: %s\n", hist)
 
 		if initialState == metal3api.StateProvisioned {
 			By("Deleting HostUpdatePolicy")
@@ -175,7 +210,8 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 
 		if initialState == metal3api.StateProvisioned {
 			By("Annotating BMH to trigger reboot for servicing")
-			AnnotateBmh(ctx, clusterProxy.GetClient(), bmh, metal3api.RebootAnnotationPrefix, nil)
+			rebootValue := "{}"
+			AnnotateBmh(ctx, clusterProxy.GetClient(), bmh, metal3api.RebootAnnotationPrefix, &rebootValue)
 		}
 
 		By(fmt.Sprintf("Waiting for HFS status.settings[%s] to become %q", biosSettingName, newValue))
@@ -193,17 +229,20 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			State:  initialState,
 		}, "25m", "5s")
 
-		var cur metal3api.BareMetalHost
-		Expect(clusterProxy.GetClient().Get(ctx, types.NamespacedName{Namespace: bmh.Namespace, Name: bmh.Name}, &cur)).To(Succeed())
-		rf := redfishStatus(ctx, bmc.Address, bmc.User, bmc.Password)
-		fmt.Printf("[monitor] final | power=%s, boot=%s, bmh=%s, ping=%s\n",
-			rf.PowerState, rf.BootProgress, cur.Status.Provisioning.State,
-			func() string {
-				if err := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "2", bmc.IPAddress).Run(); err == nil {
-					return "1"
-				}
-				return "0"
-			}())
+		if initialState == metal3api.StateProvisioned {
+			By("Waiting for BMH operational status to return to OK after servicing")
+			WaitForBmhInOperationalStatus(ctx, WaitForBmhInOperationalStatusInput{
+				Client: clusterProxy.GetClient(),
+				Bmh:    bmh,
+				State:  metal3api.OperationalStatusOK,
+			}, "25m", "5s")
+
+			By("Waiting for OCP cluster to be available")
+			Eventually(func() bool {
+				return WaitOCPReady(ctx, bmc.KubeconfigPath)
+			}, "30m", "15s").Should(BeTrue())
+		}
+
 	})
 })
 
@@ -362,6 +401,98 @@ func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) strin
 	}
 
 	return node.ProvisionState
+}
+
+// WaitOCPReady checks once if the OCP cluster is available by reading the
+// ClusterVersion "version" resource and checking its Available condition.
+// Returns true immediately if kubeconfigPath is empty.
+func WaitOCPReady(ctx context.Context, kubeconfigPath string) bool {
+	if kubeconfigPath == "" {
+		return true
+	}
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return false
+	}
+	c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return false
+	}
+
+	cv := &unstructured.Unstructured{}
+	cv.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "config.openshift.io",
+		Version: "v1",
+		Kind:    "ClusterVersion",
+	})
+	if err := c.Get(ctx, types.NamespacedName{Name: "version"}, cv); err != nil {
+		return false
+	}
+	conditions, found, err := unstructured.NestedSlice(cv.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	for _, cond := range conditions {
+		m, ok := cond.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] == "Available" {
+			return m["status"] == "True"
+		}
+	}
+	return false
+}
+
+// idracConsoleScreenshot captures the current server console display via the Dell iDRAC
+// Redfish OEM action and writes it as a PNG file to destPath.
+func idracConsoleScreenshot(ctx context.Context, bmcAddress, user, password, destPath string) error {
+	idx := strings.Index(bmcAddress, "https://")
+	if idx < 0 {
+		return fmt.Errorf("no https:// in bmc address")
+	}
+	host := strings.SplitN(bmcAddress[idx+len("https://"):], "/", 2)[0]
+	endpoint := "https://" + host + "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellLCService/Actions/DellLCService.ExportServerScreenShot"
+
+	body := strings.NewReader(`{"FileType":"ServerScreenShot"}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(user, password)
+
+	c := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402
+		},
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("http %d", resp.StatusCode)
+	}
+
+	var result struct {
+		ServerScreenShotFile string `json:"ServerScreenShotFile"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if result.ServerScreenShotFile == "" {
+		return fmt.Errorf("empty ServerScreenShotFile in response")
+	}
+
+	png, err := base64.StdEncoding.DecodeString(result.ServerScreenShotFile)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(destPath, png, 0600)
 }
 
 func createBMH(ctx context.Context, target types.NamespacedName,

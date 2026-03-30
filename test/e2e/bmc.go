@@ -47,6 +47,9 @@ type BMC struct {
 	RootDeviceHints metal3api.RootDeviceHints `yaml:"rootDeviceHints,omitempty"`
 	// Networks describes the network interfaces that should be added to the VM representing this BMH.
 	Networks []Network `yaml:"networks,omitempty"`
+	// KubeconfigPath is the path to the kubeconfig of the OCP cluster hosted on this BMH.
+	// When set, tests can wait for the cluster to be healthy after a reboot.
+	KubeconfigPath string `yaml:"kubeconfigPath,omitempty"`
 }
 
 func LoadBMCConfig(configPath string) ([]BMC, error) {
