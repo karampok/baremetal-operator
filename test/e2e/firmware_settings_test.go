@@ -70,11 +70,17 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		}
 
 		initialState = bmh.Status.Provisioning.State
-		Logf("BMH %s/%s is in state %s", bmh.Namespace, bmh.Name, initialState)
+		fmt.Printf("INFO: BMH %s/%s is in state %s\n", bmh.Namespace, bmh.Name, initialState)
 		Expect(initialState).To(BeElementOf(metal3api.StateAvailable, metal3api.StateProvisioned),
 			fmt.Sprintf("BMH must be available or provisioned, got %s", initialState))
 
+		logClusterInfo(ctx, clusterProxy)
+
 		if initialState == metal3api.StateProvisioned {
+			Expect(WaitOCPReady(ctx, bmc.KubeconfigPath)).To(BeTrue(),
+				fmt.Sprintf("OCP cluster on BMH %s/%s must be ready before test", bmh.Namespace, bmh.Name))
+			fmt.Printf("INFO: OCP cluster on BMH %s/%s is up and running\n", bmh.Namespace, bmh.Name)
+
 			By("Creating HostUpdatePolicy with firmwareSettings: onReboot")
 			hup := &metal3api.HostUpdatePolicy{
 				ObjectMeta: metav1.ObjectMeta{
@@ -510,6 +516,36 @@ func idracConsoleScreenshot(ctx context.Context, bmcAddress, user, password, des
 		return err
 	}
 	return os.WriteFile(destPath, png, 0600)
+}
+
+// logClusterInfo prints INFO lines with hub ClusterVersion, BMO image, and Ironic image.
+func logClusterInfo(ctx context.Context, proxy framework.ClusterProxy) {
+	ns := "openshift-machine-api"
+
+	cv := &unstructured.Unstructured{}
+	cv.SetGroupVersionKind(schema.GroupVersionKind{Group: "config.openshift.io", Version: "v1", Kind: "ClusterVersion"})
+	if err := proxy.GetClient().Get(ctx, types.NamespacedName{Name: "version"}, cv); err == nil {
+		if history, found, _ := unstructured.NestedSlice(cv.Object, "status", "history"); found && len(history) > 0 {
+			if entry, ok := history[0].(map[string]interface{}); ok {
+				fmt.Printf("INFO: hub ClusterVersion=%s\n", entry["version"])
+			}
+		}
+	}
+
+	pods, err := proxy.GetClientSet().CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	for _, pod := range pods.Items {
+		for _, c := range pod.Spec.Containers {
+			switch c.Name {
+			case "metal3-baremetal-operator", "baremetal-operator":
+				fmt.Printf("INFO: BMO image=%s\n", c.Image)
+			case "ironic":
+				fmt.Printf("INFO: Ironic image=%s\n", c.Image)
+			}
+		}
+	}
 }
 
 func createBMH(ctx context.Context, target types.NamespacedName,
