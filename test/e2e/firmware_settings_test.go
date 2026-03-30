@@ -160,7 +160,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 					ironicState := ironicProvisionState(monCtx, ironicNode, ironicUser, ironicPass)
 
 					now := time.Now()
-					dest := filepath.Join(screenshotDir, fmt.Sprintf("console-%s.png", now.Format("20060102-150405")))
+					dest := filepath.Join(screenshotDir, fmt.Sprintf("console-%s.jpg", now.Format("20060102-150405")))
 					_ = idracConsoleScreenshot(monCtx, bmc.Address, bmc.User, bmc.Password, dest)
 
 					state := rf.PowerState + "|" + rf.BootProgress + "|" + ping + "|" + bmhState + "|" + ironicState
@@ -195,7 +195,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		fmt.Printf("[monitor] ping history: %s\n", hist)
 		fmt.Printf("[monitor] screenshots folder: %s\n", screenshotDir)
 		absScreenshotDir, _ := filepath.Abs(screenshotDir)
-		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -pattern_type glob -i '%s/console-*.png' out.mp4\n", absScreenshotDir)
+		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -pattern_type glob -i '%s/console-*.jpg' out.mp4\n", absScreenshotDir)
 
 		if initialState == metal3api.StateProvisioned {
 			By("Deleting HostUpdatePolicy")
