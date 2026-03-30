@@ -137,6 +137,8 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 			defer ticker.Stop()
 			var lastState string
 			lastChange := time.Now()
+			var ipaLastHeartbeat string
+			var ipaLastSeen time.Time
 			for {
 				select {
 				case <-monCtx.Done():
@@ -163,7 +165,22 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 						bmhState = string(cur.Status.Provisioning.State)
 					}
 
-					ironicState := ironicProvisionState(monCtx, ironicNode, ironicUser, ironicPass)
+					ni := getIronicNodeInfo(monCtx, ironicNode, ironicUser, ironicPass)
+					// Track IPA activity: last_heartbeat only changes when IPA is sending heartbeats.
+					// This detects IPA even if agent_url is cleared between our 5s polls.
+					if ni.LastHeartbeat != "" && ni.LastHeartbeat != ipaLastHeartbeat {
+						ipaLastHeartbeat = ni.LastHeartbeat
+						ipaLastSeen = time.Now()
+					}
+					ironicState := ni.ProvisionState
+					if !ipaLastSeen.IsZero() {
+						age := int(time.Since(ipaLastSeen).Seconds())
+						if ni.AgentURL != "" {
+							ironicState += fmt.Sprintf("+ipa(%ds)", age)
+						} else if age < 120 {
+							ironicState += fmt.Sprintf("+ipa!(%ds)", age)
+						}
+					}
 
 					now := time.Now()
 					dest := filepath.Join(screenshotDir, fmt.Sprintf("console-%s.jpg", now.Format("20060102-150405")))
@@ -375,8 +392,15 @@ func ironicCredentials(ctx context.Context, proxy framework.ClusterProxy) (url, 
 	return url, user, pass
 }
 
-// ironicProvisionState queries the Ironic API for a node's provision_state.
-func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) string {
+type ironicNodeInfo struct {
+	ProvisionState string
+	AgentURL       string
+	LastHeartbeat  string
+}
+
+// getIronicNodeInfo queries the Ironic API for a node's provision_state, agent_url,
+// and last_heartbeat.
+func getIronicNodeInfo(ctx context.Context, nodeURL, user, pass string) ironicNodeInfo {
 	c := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
@@ -387,23 +411,23 @@ func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) strin
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nodeURL, http.NoBody)
 	if err != nil {
-		return "req:" + err.Error()
+		return ironicNodeInfo{ProvisionState: "req:" + err.Error()}
 	}
 	req.SetBasicAuth(user, pass)
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return "conn:" + err.Error()
+		return ironicNodeInfo{ProvisionState: "conn:" + err.Error()}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("http:%d", resp.StatusCode)
+		return ironicNodeInfo{ProvisionState: fmt.Sprintf("http:%d", resp.StatusCode)}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "read:" + err.Error()
+		return ironicNodeInfo{ProvisionState: "read:" + err.Error()}
 	}
 
 	var node struct {
@@ -412,21 +436,14 @@ func ironicProvisionState(ctx context.Context, nodeURL, user, pass string) strin
 		LastHeartbeat  string `json:"last_heartbeat"`
 	}
 	if err := json.Unmarshal(body, &node); err != nil {
-		return "json:" + err.Error()
+		return ironicNodeInfo{ProvisionState: "json:" + err.Error()}
 	}
 
-	state := node.ProvisionState
-	if node.LastHeartbeat != "" {
-		if t, err := time.Parse(time.RFC3339, node.LastHeartbeat); err == nil {
-			age := int(time.Since(t).Seconds())
-			if node.AgentURL != "" {
-				state += fmt.Sprintf("+ipa(%ds ago)", age)
-			} else if age < 120 {
-				state += fmt.Sprintf("+ipa!(%ds ago)", age)
-			}
-		}
+	return ironicNodeInfo{
+		ProvisionState: node.ProvisionState,
+		AgentURL:       node.AgentURL,
+		LastHeartbeat:  node.LastHeartbeat,
 	}
-	return state
 }
 
 // WaitOCPReady checks once if the OCP cluster is available by reading the
