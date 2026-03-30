@@ -46,6 +46,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		cancelMonitor context.CancelFunc
 		pingMu        sync.Mutex
 		pingHistory   []byte
+		screenshotDir string
 	)
 
 	BeforeEach(func() {
@@ -108,6 +109,11 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		pingMu.Lock()
 		pingHistory = pingHistory[:0]
 		pingMu.Unlock()
+		suiteConfig, _ := GinkgoConfiguration()
+		screenshotDir = filepath.Join(artifactFolder, fmt.Sprintf("%d", suiteConfig.RandomSeed))
+		Expect(os.MkdirAll(screenshotDir, 0755)).To(Succeed())
+		absScreenshotDir, _ := filepath.Abs(screenshotDir)
+		fmt.Printf("[monitor] screenshots folder: %s\n", absScreenshotDir)
 		fmt.Printf("[monitor] bmc endpoint: %s\n", bmc.Address)
 		fmt.Printf("[monitor] ping target: %s\n", bmc.IPAddress)
 		var monCtx context.Context
@@ -153,17 +159,15 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 
 					ironicState := ironicProvisionState(monCtx, ironicNode, ironicUser, ironicPass)
 
+					now := time.Now()
+					dest := filepath.Join(screenshotDir, fmt.Sprintf("console-%s.png", now.Format("20060102-150405")))
+					_ = idracConsoleScreenshot(monCtx, bmc.Address, bmc.User, bmc.Password, dest)
+
 					state := rf.PowerState + "|" + rf.BootProgress + "|" + ping + "|" + bmhState + "|" + ironicState
 					if state != lastState {
-						now := time.Now()
 						dur := now.Sub(lastChange).Truncate(time.Second)
-						dest := filepath.Join(artifactFolder, fmt.Sprintf("console-%s.png", now.Format("15-04-05")))
-						screenshotNote := fmt.Sprintf("(screenshot at %s)", dest)
-						if err := idracConsoleScreenshot(monCtx, bmc.Address, bmc.User, bmc.Password, dest); err != nil {
-							screenshotNote = fmt.Sprintf("(screenshot error: %v)", err)
-						}
-						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s %s\n",
-							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping, screenshotNote)
+						fmt.Printf("[monitor] %s (%3ds) | power=%-3s, boot=%s, bmh=%s, ironic=%s, ping=%s\n",
+							now.Format("15:04:05"), int(dur.Seconds()), rf.PowerState, rf.BootProgress, bmhState, ironicState, ping)
 						lastState = state
 						lastChange = now
 					}
@@ -189,6 +193,9 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 				return "0"
 			}())
 		fmt.Printf("[monitor] ping history: %s\n", hist)
+		fmt.Printf("[monitor] screenshots folder: %s\n", screenshotDir)
+		absScreenshotDir, _ := filepath.Abs(screenshotDir)
+		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -pattern_type glob -i '%s/console-*.png' out.mp4\n", absScreenshotDir)
 
 		if initialState == metal3api.StateProvisioned {
 			By("Deleting HostUpdatePolicy")
