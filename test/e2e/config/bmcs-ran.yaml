@@ -1,0 +1,9 @@
+- user: "root"
+  password: "calvin"
+  address: "idrac-virtualmedia+https://10.8.35.51/redfish/v1/Systems/System.Embedded.1"
+  disableCertificateVerification: true
+  bootMacAddress: "b4:96:91:c8:00:d4"
+  name: "dell-r750-df27"
+  namespace: "dell-r750-pool"
+  ipAddress: "10.8.34.50"
+  kubeconfigPath: "/home/kka/.kube/cnfdf27-kubeconfig"

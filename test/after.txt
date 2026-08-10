@@ -1,0 +1,87 @@
+[I] kka@x1g12 ~/w/b/d/test (dev ↑13↓12 ✔) [1]> time DEPLOY_IRONIC=false DEPLOY_BMO=false DEPLOY_CERT_MANAGER=false go test -v ./e2e/ -tags e2e -run TestE2e -count 1 --ginkgo.label-filter="firmware-settings" --ginkgo.v -e2e.config config/ironic.yaml -e2e.bmcsConfig config/bmcs-ran.yaml -e2e.use-existing-cluster -timeout 30m
+=== RUN   TestE2e
+Running Suite: E2e Suite - /home/kka/wkts/baremetal-operator/dev/test/e2e
+=========================================================================
+Random Seed: 1774888472
+
+Will run 1 of 22 specs
+------------------------------
+[SynchronizedBeforeSuite]
+/home/kka/wkts/baremetal-operator/dev/test/e2e/e2e_suite_test.go:83
+[SynchronizedBeforeSuite] PASSED [0.001 seconds]
+------------------------------
+SSSSSSSSSSSSSSS
+------------------------------
+Firmware settings should toggle turbo BIOS setting [firmware-settings]
+/home/kka/wkts/baremetal-operator/dev/test/e2e/firmware_settings_test.go:234
+INFO: BMH dell-r750-pool/dell-r750-df27 is in state provisioned
+INFO: hub ClusterVersion=4.21.4
+INFO: BMO image=quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:2c1e2d1ee287d5a665021760194075c312ae7d0bbc9c8e8c3b137832e68c56f0
+INFO: OCP cluster on BMH dell-r750-pool/dell-r750-df27 is up and running
+  STEP: Creating HostUpdatePolicy with firmwareSettings: onReboot @ 03/30/26 18:34:37
+  STEP: Reading the HostFirmwareSettings resource @ 03/30/26 18:34:37.769
+  INFO: Current ProcTurboMode = "Enabled", changing to "Disabled"
+[monitor] screenshots folder: /home/kka/wkts/baremetal-operator/dev/test/e2e/_artifacts/1774888472
+[monitor] bmc endpoint: idrac-virtualmedia+https://10.8.35.51/redfish/v1/Systems/System.Embedded.1
+[monitor] ping target: 10.8.34.50
+[monitor] ironic endpoint: https://10.6.35.213:6385
+  STEP: Patching HFS spec.settings to change ProcTurboMode @ 03/30/26 18:34:39.227
+  STEP: Annotating BMH to trigger reboot for servicing @ 03/30/26 18:34:39.232
+  STEP: Waiting for HFS status.settings[ProcTurboMode] to become "Disabled" @ 03/30/26 18:34:40.008
+[monitor] 18:34:47 (  8s) | power=On , boot=OSRunning, bmh=provisioned, ironic=active, ping=1, vmedia=-
+[monitor] 18:34:53 (  6s) | power=Off, boot=None, bmh=provisioned, ironic=servicing, ping=0, vmedia=-
+[monitor] 18:35:24 ( 30s) | power=Off, boot=None, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:35:57 ( 32s) | power=On , boot=POST, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:39:10 (193s) | power=Off, boot=None, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:39:42 ( 32s) | power=On , boot=POST, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:42:31 (168s) | power=On , boot=OSRunning, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:42:58 ( 26s) | power=On , boot=OSRunning, bmh=provisioned, ironic=servicing, ping=1, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:43:21 ( 23s) | power=Off, boot=None, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:43:50 ( 29s) | power=On , boot=POST, bmh=provisioned, ironic=servicing, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:44:01 ( 11s) | power=On , boot=POST, bmh=provisioned, ironic=service wait, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+  STEP: Waiting for BMH to return to provisioned @ 03/30/26 18:44:27.012
+  STEP: Waiting for BMH operational status to return to OK after servicing @ 03/30/26 18:44:27.572
+[monitor] 18:46:13 (131s) | power=On , boot=OSRunning, bmh=provisioned, ironic=service wait, ping=0, vmedia=-
+[monitor] 18:46:45 ( 32s) | power=On , boot=OSRunning, bmh=provisioned, ironic=service wait, ping=0, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:47:26 ( 40s) | power=On , boot=OSRunning, bmh=provisioned, ironic=service wait, ping=1, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:47:48 ( 21s) | power=On , boot=OSRunning, bmh=provisioned, ironic=servicing, ping=1, vmedia=boot-2c57a385-770e-4755-adc4-c113af47c826.iso
+[monitor] 18:48:01 ( 12s) | power=Off, boot=None, bmh=provisioned, ironic=servicing, ping=0, vmedia=-
+  STEP: Waiting for OCP cluster to be available @ 03/30/26 18:48:44.264
+[monitor] 18:48:42 ( 41s) | power=On , boot=POST, bmh=provisioned, ironic=servicing, ping=0, vmedia=-
+[monitor] 18:48:53 ( 10s) | power=On , boot=None, bmh=provisioned, ironic=active, ping=0, vmedia=-
+[monitor] 18:49:03 ( 10s) | power=On , boot=POST, bmh=provisioned, ironic=active, ping=0, vmedia=-
+[monitor] 18:51:15 (131s) | power=On , boot=OSRunning, bmh=provisioned, ironic=active, ping=0, vmedia=-
+[monitor] 18:51:44 ( 29s) | power=On , boot=OSRunning, bmh=provisioned, ironic=active, ping=1, vmedia=-
+  STEP: Stopping monitors @ 03/30/26 18:53:04.995
+[monitor] final | power=On, boot=OSRunning, ping=1
+[monitor] ping history: 10000000000000000000000000000000000000000000000000001100000000000000000000000001110000000000000000000000111111111
+[monitor] screenshots folder: _artifacts/1774888472
+[monitor] to create video: ffmpeg -framerate 1 -f image2 -vcodec mjpeg -pattern_type glob -i '/home/kka/wkts/baremetal-operator/dev/test/e2e/_artifacts/1774888472/console-*.jpg' -c:v libx264 -pix_fmt yuv420p out.mp4
+  STEP: Deleting HostUpdatePolicy @ 03/30/26 18:53:06.031
+• [1114.569 seconds]
+------------------------------
+SSSSSS
+------------------------------
+[SynchronizedAfterSuite]
+/home/kka/wkts/baremetal-operator/dev/test/e2e/e2e_suite_test.go:212
+  STEP: Tearing down the management cluster @ 03/30/26 18:53:07.419
+[SynchronizedAfterSuite] PASSED [0.000 seconds]
+------------------------------
+[DeferCleanup (Suite)]
+/home/kka/wkts/baremetal-operator/dev/test/e2e/e2e_suite_test.go:109
+[DeferCleanup (Suite)] PASSED [0.000 seconds]
+------------------------------
+
+Ran 1 of 22 Specs in 1114.571 seconds
+SUCCESS! -- 1 Passed | 0 Failed | 0 Pending | 21 Skipped
+--- PASS: TestE2e (1114.57s)
+PASS
+ok  	github.com/metal3-io/baremetal-operator/test/e2e	1114.597s
+
+________________________________________________________
+Executed in   18.61 mins    fish           external
+   usr time   11.28 secs    1.10 millis   11.28 secs
+   sys time    1.94 secs    0.02 millis    1.94 secs
+
+[I] kka@x1g12 ~/w/b/d/test (dev ↑13↓12 ✔)>
+

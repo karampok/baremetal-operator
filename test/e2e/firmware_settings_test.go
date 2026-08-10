@@ -47,6 +47,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		pingMu        sync.Mutex
 		pingHistory   []byte
 		screenshotDir string
+		logStartTime  time.Time
 	)
 
 	BeforeEach(func() {
@@ -112,12 +113,13 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 	})
 
 	BeforeEach(func() {
+		logStartTime = time.Now()
 		pingMu.Lock()
 		pingHistory = pingHistory[:0]
 		pingMu.Unlock()
 		suiteConfig, _ := GinkgoConfiguration()
 		screenshotDir = filepath.Join(artifactFolder, fmt.Sprintf("%d", suiteConfig.RandomSeed))
-		Expect(os.MkdirAll(screenshotDir, 0755)).To(Succeed())
+		Expect(os.MkdirAll(filepath.Join(screenshotDir, "console"), 0755)).To(Succeed())
 		absScreenshotDir, _ := filepath.Abs(screenshotDir)
 		fmt.Printf("[monitor] screenshots folder: %s\n", absScreenshotDir)
 		fmt.Printf("[monitor] bmc endpoint: %s\n", bmc.Address)
@@ -185,7 +187,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 					vmedia := redfishVirtualMedia(monCtx, bmc.Address, bmc.User, bmc.Password)
 
 					now := time.Now()
-					dest := filepath.Join(screenshotDir, fmt.Sprintf("console-%s.jpg", now.Format("20060102-150405")))
+					dest := filepath.Join(screenshotDir, "console", fmt.Sprintf("%s.jpeg", now.Format("20060102-150405")))
 					_ = idracConsoleScreenshot(monCtx, bmc.Address, bmc.User, bmc.Password, dest)
 
 					state := rf.PowerState + "|" + rf.BootProgress + "|" + ping + "|" + bmhState + "|" + ironicState + "|" + vmedia
@@ -205,6 +207,19 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		By("Stopping monitors")
 		cancelMonitor()
 
+		By("Saving Ironic and BMO logs since test start")
+		_ = os.MkdirAll(screenshotDir, 0755)
+		ironicLog := filepath.Join(screenshotDir, "ironic.log")
+		bmoLog := filepath.Join(screenshotDir, "bmo.log")
+		fmt.Printf("[logs] ironic log: %s\n", ironicLog)
+		fmt.Printf("[logs] bmo log: %s\n", bmoLog)
+		if err := savePodLogs(ctx, clusterProxy, "openshift-machine-api", "baremetal.openshift.io/cluster-baremetal-operator=metal3-state", "metal3-ironic", logStartTime, ironicLog); err != nil {
+			fmt.Printf("[logs] ironic save failed: %v\n", err)
+		}
+		if err := savePodLogs(ctx, clusterProxy, "openshift-machine-api", "baremetal.openshift.io/cluster-baremetal-operator=metal3-baremetal-operator", "metal3-baremetal-operator", logStartTime, bmoLog); err != nil {
+			fmt.Printf("[logs] bmo save failed: %v\n", err)
+		}
+
 		rf := redfishStatus(ctx, bmc.Address, bmc.User, bmc.Password)
 		pingMu.Lock()
 		hist := string(pingHistory)
@@ -220,7 +235,7 @@ var _ = Describe("Firmware settings", Label("firmware-settings"), func() {
 		fmt.Printf("[monitor] ping history: %s\n", hist)
 		fmt.Printf("[monitor] screenshots folder: %s\n", screenshotDir)
 		absScreenshotDir, _ := filepath.Abs(screenshotDir)
-		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -f image2 -vcodec mjpeg -pattern_type glob -i '%s/console-*.jpg' -c:v libx264 -pix_fmt yuv420p out.mp4\n", absScreenshotDir)
+		fmt.Printf("[monitor] to create video: ffmpeg -framerate 1 -f image2 -vcodec mjpeg -pattern_type glob -i '%s/console/*.jpeg' -c:v libx264 -pix_fmt yuv420p out.mp4\n", absScreenshotDir)
 
 		if initialState == metal3api.StateProvisioned {
 			By("Deleting HostUpdatePolicy")
@@ -409,6 +424,14 @@ func ironicCredentials(ctx context.Context, proxy framework.ClusterProxy) (url, 
 								url = fmt.Sprintf("https://%s",
 									net.JoinHostPort(ep.Addresses[0], fmt.Sprintf("%d", *port.Port)))
 								fmt.Printf("[monitor] ironic endpoint: %s\n", url)
+								pods, _ := proxy.GetClientSet().CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+								for _, pod := range pods.Items {
+									for _, c := range pod.Spec.Containers {
+										if c.Name == "metal3-ironic" || c.Name == "ironic" {
+											fmt.Printf("[monitor] ironic image: %s\n", c.Image)
+										}
+									}
+								}
 								return url, user, pass
 							}
 						}
@@ -604,11 +627,40 @@ func logClusterInfo(ctx context.Context, proxy framework.ClusterProxy) {
 			switch c.Name {
 			case "metal3-baremetal-operator", "baremetal-operator":
 				fmt.Printf("INFO: BMO image=%s\n", c.Image)
-			case "ironic":
+			case "metal3-ironic", "ironic":
 				fmt.Printf("INFO: Ironic image=%s\n", c.Image)
 			}
 		}
 	}
+}
+
+// savePodLogs fetches logs from the first pod matching labelSelector since the
+// given timestamp and writes them to destPath.
+func savePodLogs(ctx context.Context, proxy framework.ClusterProxy, ns, labelSelector, container string, since time.Time, destPath string) error {
+	pods, err := proxy.GetClientSet().CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return fmt.Errorf("list pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return fmt.Errorf("no pods found for %s", labelSelector)
+	}
+	sinceTime := metav1.NewTime(since)
+	req := proxy.GetClientSet().CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{
+		Container: container,
+		SinceTime: &sinceTime,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return fmt.Errorf("stream logs: %w", err)
+	}
+	defer stream.Close()
+	f, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("create file: %w", err)
+	}
+	defer f.Close()
+	_, err = io.Copy(f, stream)
+	return err
 }
 
 func createBMH(ctx context.Context, target types.NamespacedName,
